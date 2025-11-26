@@ -1,8 +1,9 @@
-# routers/sales.py
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from datetime import date
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, List
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session, joinedload
 
 from db import get_db
 import models, schemas
@@ -11,50 +12,130 @@ from routers.auth import get_current_user
 router = APIRouter(prefix="/sales", tags=["Sales"])
 
 
-@router.post("/", response_model=schemas.SalesOut, status_code=201)
+# =====================================================
+# Helper: Auto-build INTERNAL product using its recipe
+# =====================================================
+def auto_build_from_recipe(db: Session, product: models.Product, qty_needed: Decimal) -> int:
+    """
+    Try building INTERNAL product using recipe (RAW components).
+    Returns how many INTERNAL units were successfully built.
+    """
+    recipe_rows = (
+        db.query(models.ProductRecipe)
+        .filter(models.ProductRecipe.product_id == product.id)
+        .all()
+    )
+
+    if not recipe_rows:
+        return 0  # cannot build anything
+
+    possible_counts = []
+    for rc in recipe_rows:
+        comp = (
+            db.query(models.Product)
+            .filter(models.Product.id == rc.component_product_id)
+            .with_for_update()
+            .first()
+        )
+        if not comp or comp.stock_qty is None or comp.stock_qty <= 0:
+            return 0
+
+        max_units = float(comp.stock_qty) / float(rc.qty_per_unit)
+        possible_counts.append(max_units)
+
+    max_can_build = int(min(possible_counts)) if possible_counts else 0
+    if max_can_build <= 0:
+        return 0
+
+    build_qty = min(int(qty_needed), max_can_build)
+
+    # Consume RAW
+    for rc in recipe_rows:
+        comp = (
+            db.query(models.Product)
+            .filter(models.Product.id == rc.component_product_id)
+            .with_for_update()
+            .first()
+        )
+        needed = float(rc.qty_per_unit) * float(build_qty)
+
+        before = comp.stock_qty
+        after = before - needed
+        comp.stock_qty = after
+
+        db.add(
+            models.StockMovement(
+                product_id=comp.id,
+                type="OUT",
+                ref_type="BUILD",
+                qty_change=needed,
+                stock_before=before,
+                stock_after=after,
+                notes=f"Auto-build {build_qty} {product.name}",
+            )
+        )
+
+    # Add stock of INTERNAL product
+    before = product.stock_qty or 0
+    after = before + build_qty
+    product.stock_qty = after
+
+    db.add(
+        models.StockMovement(
+            product_id=product.id,
+            type="IN",
+            ref_type="BUILD",
+            qty_change=build_qty,
+            stock_before=before,
+            stock_after=after,
+            notes="Auto-build from recipe",
+        )
+    )
+
+    return build_qty
+
+
+# =====================================================
+# CREATE SALE (stok, rekening, ledger)
+# =====================================================
+@router.post("/", response_model=schemas.SalesOut, status_code=status.HTTP_201_CREATED)
 def create_sale(
     payload: schemas.SalesCreate,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    """
-    Create new sales order with customer tracking and automatic stock deduction.
-    Supports both final products (INTERNAL) and raw material consumption via recipes.
-    """
     if not payload.items:
         raise HTTPException(status_code=400, detail="No items in sale")
 
-    # =========================
-    # Handle Customer: Auto-create or use existing
-    # =========================
+    # -----------------------------
+    # CUSTOMER HANDLING
+    # -----------------------------
     customer_id = payload.customer_id
-    
+    customer = None
+
     if customer_id:
-        # Validasi customer yang sudah ada
-        customer = db.query(models.Customer).filter(
-            models.Customer.id == customer_id
-        ).first()
+        customer = (
+            db.query(models.Customer)
+            .filter(models.Customer.id == customer_id)
+            .first()
+        )
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
-        customer_name = customer.name
     else:
-        # Auto-create customer baru jika belum ada
         if not payload.customer_name:
             raise HTTPException(
-                status_code=400, 
-                detail="customer_name is required when customer_id is not provided"
+                status_code=400,
+                detail="customer_name required if customer_id not provided",
             )
-        
-        # Cek apakah customer dengan nama ini sudah ada
-        existing_customer = db.query(models.Customer).filter(
-            models.Customer.name == payload.customer_name
-        ).first()
-        
-        if existing_customer:
-            customer = existing_customer
-            customer_id = existing_customer.id
+
+        existing = (
+            db.query(models.Customer)
+            .filter(models.Customer.name == payload.customer_name)
+            .first()
+        )
+        if existing:
+            customer = existing
         else:
-            # Buat customer baru
             customer = models.Customer(
                 name=payload.customer_name,
                 phone=payload.customer_phone,
@@ -62,45 +143,57 @@ def create_sale(
             )
             db.add(customer)
             db.flush()
-            customer_id = customer.id
-        
-        customer_name = customer.name
 
-    # =========================
-    # Hitung total penjualan (pakai Decimal)
-    # =========================
+        customer_id = customer.id
+
+    customer_name = customer.name if customer else payload.customer_name
+
+    # -----------------------------
+    # VALIDATE / GET ACCOUNT (IN)
+    # -----------------------------
+    account = None
+    if payload.payment_method in ("CASH", "TRANSFER"):
+        if not payload.source_account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="source_account_id is required for CASH / TRANSFER payments",
+            )
+        account = db.query(models.Account).get(payload.source_account_id)
+        if not account:
+            raise HTTPException(status_code=400, detail="Source account not found")
+
+    # -----------------------------
+    # CALCULATE TOTAL
+    # -----------------------------
     total_amount = Decimal("0")
     for item in payload.items:
         qty = Decimal(str(item.qty))
         unit_price = Decimal(str(item.unit_price))
-        discount = Decimal(str(item.discount))
+        discount = Decimal(str(item.discount or 0))
+        total_amount += (qty * unit_price) - discount
 
-        line_subtotal = (unit_price * qty) - discount
-        total_amount += line_subtotal
-
-    # =========================
-    # Buat header SalesOrder dengan customer_id
-    # =========================
+    # -----------------------------
+    # CREATE HEADER
+    # -----------------------------
     sale = models.SalesOrder(
-        customer_id=customer_id,  # ✅ Selalu terisi
+        customer_id=customer_id,
         customer_name=customer_name,
+        order_date=payload.order_date or date.today(),
         payment_method=payload.payment_method,
         total_amount=total_amount,
         status="PAID",
         notes=payload.notes,
+        source_account_id=payload.source_account_id,
     )
     db.add(sale)
-    db.flush()  # supaya sale.id terisi
+    db.flush()
 
-    # =========================
-    # Proses tiap item penjualan
-    # =========================
+    # -----------------------------
+    # PROCESS EACH ITEM (STOCK)
+    # -----------------------------
     for item in payload.items:
         qty = Decimal(str(item.qty))
-        unit_price = Decimal(str(item.unit_price))
-        discount = Decimal(str(item.discount))
 
-        # Lock product untuk update stok
         product = (
             db.query(models.Product)
             .filter(models.Product.id == item.product_id)
@@ -110,131 +203,89 @@ def create_sale(
         if not product:
             raise HTTPException(
                 status_code=404,
-                detail=f"Product id {item.product_id} not found",
+                detail=f"Product {item.product_id} not found",
             )
 
-        # Batasi hanya INTERNAL yang boleh dijual
-        if product.product_type != "INTERNAL":
-            raise HTTPException(
-                status_code=400,
-                detail=f"Product {product.name} is not for sale (type={product.product_type})",
-            )
+        stock_before = Decimal(str(product.stock_qty or 0))
 
-        # Validasi stok produk final
-        stock_before = product.stock_qty or Decimal("0")
+        # INTERNAL: boleh auto-build
+        if product.product_type == "INTERNAL":
+            if stock_before < qty:
+                needed = qty - stock_before
+                built = auto_build_from_recipe(db, product, needed)
+                db.flush()
+                stock_before = Decimal(str(product.stock_qty or 0))
+
+        # Cek stok akhir
         if stock_before < qty:
             raise HTTPException(
                 status_code=400,
-                detail=f"Insufficient stock for {product.name}. "
-                       f"Available: {stock_before}, requested: {qty}",
+                detail=(
+                    f"Insufficient stock for {product.name}: "
+                    f"available {stock_before}, requested {qty}"
+                ),
             )
 
-        # Kurangi stok produk final
-        product.stock_qty = stock_before - qty
-        stock_after = product.stock_qty
+        stock_after = stock_before - qty
+        product.stock_qty = stock_after
 
-        # Simpan detail item penjualan
-        line_subtotal = (unit_price * qty) - discount
-        line = models.SalesOrderItem(
-            sales_order_id=sale.id,
-            product_id=item.product_id,
-            qty=qty,
-            unit_price=unit_price,
-            discount=discount,
-            subtotal=line_subtotal,
-        )
-        db.add(line)
+        unit_price = Decimal(str(item.unit_price))
+        discount = Decimal(str(item.discount or 0))
+        subtotal = (qty * unit_price) - discount
 
-        # Catat pergerakan stok produk final
-        movement = models.StockMovement(
-            product_id=item.product_id,
-            type="OUT",
-            ref_type="SALE",
-            ref_id=sale.id,
-            qty_change=-qty,
-            stock_before=stock_before,
-            stock_after=stock_after,
-            notes=f"Sale to customer: {customer_name}",
-        )
-        db.add(movement)
-
-        # =========================
-        # 🔥 KURANGI STOK BAHAN BAKU BERDASARKAN RECIPE
-        # =========================
-        recipe_rows = (
-            db.query(models.ProductRecipe)
-            .filter(models.ProductRecipe.product_id == product.id)
-            .all()
-        )
-
-        for rc in recipe_rows:
-            # Lock component product
-            component = (
-                db.query(models.Product)
-                .filter(models.Product.id == rc.component_product_id)
-                .with_for_update()
-                .first()
+        db.add(
+            models.SalesOrderItem(
+                sales_order_id=sale.id,
+                product_id=product.id,
+                qty=qty,
+                unit_price=unit_price,
+                discount=discount,
+                subtotal=subtotal,
             )
-            if not component:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Component product id {rc.component_product_id} not found "
-                           f"in recipe for {product.name}",
-                )
+        )
 
-            # Hitung kebutuhan bahan baku
-            qty_per_unit = rc.qty_per_unit or Decimal("0")
-            needed_qty = qty_per_unit * qty
-
-            if needed_qty <= 0:
-                continue
-
-            # Validasi stok bahan baku
-            component_stock_before = component.stock_qty or Decimal("0")
-            if component_stock_before < needed_qty:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Insufficient raw material: {component.name}. "
-                        f"Required: {needed_qty}, available: {component_stock_before}"
-                    ),
-                )
-
-            # Kurangi stok bahan baku
-            component.stock_qty = component_stock_before - needed_qty
-            component_stock_after = component.stock_qty
-
-            # Catat pergerakan stok bahan baku
-            component_movement = models.StockMovement(
-                product_id=component.id,
+        db.add(
+            models.StockMovement(
+                product_id=product.id,
                 type="OUT",
                 ref_type="SALE",
                 ref_id=sale.id,
-                qty_change=-needed_qty,
-                stock_before=component_stock_before,
-                stock_after=component_stock_after,
-                notes=f"Raw material consumption for {product.name} (customer: {customer_name})",
+                qty_change=qty,
+                stock_before=stock_before,
+                stock_after=stock_after,
+                notes=f"Sale to {customer_name}",
             )
-            db.add(component_movement)
+        )
 
-    # =========================
-    # Buku kas (cash ledger)
-    # =========================
-    ledger = models.CashLedger(
-        type="IN",
-        source="SALE",
-        ref_id=sale.id,
-        amount=total_amount,
-        notes=f"Sales payment from {customer_name} via {payload.payment_method}",
-    )
-    db.add(ledger)
+    # -----------------------------
+    # UPDATE ACCOUNT BALANCE (IN)
+    # -----------------------------
+    if account:
+        account.current_balance = (account.current_balance or Decimal("0")) + total_amount
+
+    # -----------------------------
+    # CASH LEDGER (IN)
+    # -----------------------------
+    if payload.payment_method in ("CASH", "TRANSFER"):
+        db.add(
+            models.CashLedger(
+                type="IN",
+                source="SALE",
+                ref_id=sale.id,
+                amount=total_amount,
+                notes=f"Payment from {customer_name}",
+            )
+        )
 
     db.commit()
     db.refresh(sale)
     return sale
 
 
-@router.get("/", response_model=list[schemas.SalesOut])
+# =====================================================
+# GET LIST SALES
+# =====================================================
+@router.get("/", response_model=List[schemas.SalesOut])
 def list_sales(
     skip: int = 0,
     limit: int = 100,
@@ -242,13 +293,30 @@ def list_sales(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    """Get all sales orders with optional customer filter"""
-    query = db.query(models.SalesOrder)
-    
+    q = (
+        db.query(models.SalesOrder)
+        .options(
+            joinedload(models.SalesOrder.items).joinedload(models.SalesOrderItem.product),
+            joinedload(models.SalesOrder.source_account),   # ⬅️ load akun
+        )
+    )
+
     if customer_id:
-        query = query.filter(models.SalesOrder.customer_id == customer_id)
-    
-    sales = query.order_by(models.SalesOrder.order_date.desc()).offset(skip).limit(limit).all()
+        q = q.filter(models.SalesOrder.customer_id == customer_id)
+
+    sales = (
+        q.order_by(models.SalesOrder.order_date.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+
+    # isi product_name agar terbaca di schema
+    for sale in sales:
+        for item in sale.items:
+            if item.product:
+                item.product_name = item.product.name
+
     return sales
 
 
@@ -258,8 +326,48 @@ def get_sale(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    """Get sale order by ID with items"""
-    sale = db.query(models.SalesOrder).filter(models.SalesOrder.id == sale_id).first()
+    sale = (
+        db.query(models.SalesOrder)
+        .options(
+            joinedload(models.SalesOrder.items).joinedload(models.SalesOrderItem.product),
+            joinedload(models.SalesOrder.source_account),
+        )
+        .filter(models.SalesOrder.id == sale_id)
+        .first()
+    )
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
+
+    for item in sale.items:
+        if item.product:
+            item.product_name = item.product.name
+
+    return sale
+
+
+# =====================================================
+# GET SINGLE SALE
+# =====================================================
+@router.get("/{sale_id}", response_model=schemas.SalesOut)
+def get_sale(
+    sale_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    sale = (
+        db.query(models.SalesOrder)
+        .options(
+            joinedload(models.SalesOrder.items).joinedload(models.SalesOrderItem.product),
+            joinedload(models.SalesOrder.source_account),
+        )
+        .filter(models.SalesOrder.id == sale_id)
+        .first()
+    )
+    if not sale:
+        raise HTTPException(status_code=404, detail="Sale not found")
+
+    for item in sale.items:
+        if item.product:
+            item.product_name = item.product.name
+
     return sale

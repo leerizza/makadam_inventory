@@ -1,7 +1,7 @@
 # schemas.py
 from pydantic import BaseModel, ConfigDict, EmailStr
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from enum import Enum
 
@@ -85,7 +85,7 @@ class ProductOut(BaseModel):
     name: str
     category: Optional[str]
     unit: Optional[str]
-    product_type: ProductType       # ← di sini
+    product_type: ProductType
     base_cost: Decimal
     sell_price: Decimal
     stock_qty: Decimal
@@ -93,9 +93,36 @@ class ProductOut(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: Optional[datetime]
-    # class Config:
-    #     from_attributes = True
 
+class ProductUpdate(BaseModel):
+    sku: Optional[str] = None
+    name: Optional[str] = None
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    product_type: Optional[ProductType] = None
+    base_cost: Optional[float] = None
+    sell_price: Optional[float] = None
+    stock_qty: Optional[float] = None
+    min_stock: Optional[float] = None
+    is_active: Optional[bool] = None
+
+class AccountBase(BaseModel):
+    name: str
+    type: str
+    number: str | None = None
+    current_balance: Decimal | None = None
+
+class AccountCreate(AccountBase):
+    pass
+
+class AccountOut(AccountBase):
+    id: int
+    is_active: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
 
 # ===== Sales =====
 class SalesItemIn(BaseModel):
@@ -103,6 +130,7 @@ class SalesItemIn(BaseModel):
     qty: float
     unit_price: float
     discount: float = 0
+    
 
 # class SalesItemCreate(BaseModel):
 #     product_id: int
@@ -112,12 +140,17 @@ class SalesItemIn(BaseModel):
 
 class SalesCreate(BaseModel):
     customer_id: Optional[int] = None  # Optional, akan auto-create jika None
+    order_date: datetime
     customer_name: Optional[str] = None  # Wajib jika customer_id None
     customer_phone: Optional[str] = None
     customer_email: Optional[str] = None
     payment_method: str = "CASH"
     notes: Optional[str] = None
     items: list[SalesItemIn]
+    payment_method: str
+    source_account_id: int | None = None   # <- baru
+
+    
 
 class SalesOut(BaseModel):
     id: int
@@ -128,24 +161,95 @@ class SalesOut(BaseModel):
     total_amount: Decimal
     payment_method: str
     notes: Optional[str]
+    payment_method: str
+    source_account_id: int | None = None   # <- baru
+    
     
     class Config:
         from_attributes = True
+
+class SalesItemOut(BaseModel):
+    id: int
+    product_id: int
+    qty: Decimal
+    unit_price: Decimal
+    discount: Decimal
+    subtotal: Decimal
+    product_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class SalesOut(BaseModel):
+    id: int
+    customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
+    order_date: datetime
+    status: str
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+    notes: Optional[str] = None
+
+    # 🔹 FIELD AKUN YANG KITA BUTUH
+    source_account_id: Optional[int] = None
+    source_account: Optional[AccountOut] = None
+
+    items: List[SalesItemOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+
+class SalesOrderItemOut(BaseModel):
+    id: int
+    product_id: int
+    qty: Decimal
+    unit_price: Decimal
+    discount: Decimal
+    subtotal: Decimal
+
+    class Config:
+        from_attributes = True
+
+
+class SalesOrderOut(BaseModel):
+    id: int
+    customer_id: Optional[int] = None
+    customer_name: Optional[str] = None
+    order_date: datetime
+    status: str
+    total_amount: Decimal
+    payment_method: Optional[str] = None
+
+    # ⬇️ ini yang akan dipakai di frontend
+    source_account_id: Optional[int] = None
+    source_account_name: Optional[str] = None  
+
+    items: List[SalesOrderItemOut] = []
+
+    class Config:
+       from_attributes = True
+
 
 class PurchaseItemCreate(BaseModel):
     product_id: int
     qty: Decimal
     unit_cost: Decimal
     discount: Decimal = Decimal("0")
+    plan_item_id: Optional[int] = None   # 🔥 NEW – link ke rencana
+    
 
 class PurchaseCreate(BaseModel):
-    supplier_id: Optional[int] = None
-    supplier_name: Optional[str] = None   # kalau belum pakai master supplier
-    invoice_number: Optional[str] = None
-    purchase_date: Optional[datetime] = None
-    payment_method: str = "CASH"
-    notes: Optional[str] = None
-    items: List[PurchaseItemCreate]
+    supplier_id: Optional[int]
+    supplier_name: Optional[str]
+    invoice_number: Optional[str]
+    purchase_date: date
+    payment_method: str
+    source_account_id: Optional[int] = None   # 👈 PENTING
+    notes: Optional[str]
+    items: list[PurchaseItemCreate]
 
 
 class PurchaseItemOut(BaseModel):
@@ -173,6 +277,17 @@ class PurchaseOut(BaseModel):
     notes: Optional[str] = None
     items: List[PurchaseItemOut]
 
+    source_account_id: Optional[int] = None
+    source_account: Optional[AccountOut] = None  # 🔹 buat ledger
+
+class AccountOut(AccountBase):
+    id: int
+    is_active: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
 
 # --- EXPENSES ---
 
@@ -183,6 +298,8 @@ class ExpenseCreate(BaseModel):
     amount: Decimal
     payment_method: str = "CASH"
     notes: Optional[str] = None
+    payment_method: str
+    source_account_id: int | None = None
 
 
 class ExpenseOut(BaseModel):
@@ -195,7 +312,9 @@ class ExpenseOut(BaseModel):
     amount: Decimal
     payment_method: str
     notes: Optional[str]
-
+    source_account_id: Optional[int] = None
+    source_account: Optional[AccountOut] = None  # 🔹 buat ledger
+    
 # --- Customers ---
 
 class CustomerBase(BaseModel):
@@ -268,3 +387,102 @@ class RecipeComponentOut(BaseModel):
     component_product_id: int
     qty_per_unit: Decimal
 
+
+class StockMovementOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    product_id: int
+    movement_date: datetime
+    type: str                     # IN, OUT, ADJUST
+    ref_type: Optional[str] = None
+    ref_id: Optional[int] = None
+    qty_change: Decimal
+    stock_before: Optional[Decimal] = None
+    stock_after: Optional[Decimal] = None
+    notes: Optional[str] = None
+
+    # UI membutuhkan ini → untuk tampilkan nama product
+    product_name: Optional[str] = None
+
+
+
+class BuildFromRecipeIn(BaseModel):
+    product_id: int          # ID produk INTERNAL yang mau diproduksi
+    qty_to_build: Decimal    # berapa qty yang mau ditambah stoknya
+
+
+class BuildFromRecipeComponentUsage(BaseModel):
+    product_id: int
+    product_name: str
+    qty_used: Decimal
+    stock_before: Decimal
+    stock_after: Decimal
+
+
+class BuildFromRecipeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    product_id: int
+    product_name: str
+    qty_built: Decimal
+    stock_before: Decimal
+    stock_after: Decimal
+    components: List[BuildFromRecipeComponentUsage]
+
+
+
+class PurchasePlanItemCreate(BaseModel):
+    product_id: int
+    planned_qty: Decimal
+
+
+class PurchasePlanCreate(BaseModel):
+    supplier_id: Optional[int] = None
+    supplier_name: Optional[str] = None
+    target_date: Optional[datetime] = None
+    notes: Optional[str] = None
+    items: List[PurchasePlanItemCreate]
+
+
+class PurchasePlanItemOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    product_id: int
+    planned_qty: Decimal
+    received_qty: Decimal
+
+    @property
+    def remaining_qty(self) -> Decimal:
+        return self.planned_qty - self.received_qty
+
+
+class PurchasePlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    supplier_id: Optional[int]
+    supplier_name: Optional[str]
+    target_date: Optional[datetime]
+    notes: Optional[str]
+    status: str
+    items: List[PurchasePlanItemOut]
+
+class AccountBase(BaseModel):
+    name: str
+    type: str
+    number: str | None = None
+    current_balance: Decimal | None = None
+
+class AccountCreate(AccountBase):
+    pass
+
+class AccountOut(AccountBase):
+    id: int
+    is_active: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    class Config:
+        from_attributes = True

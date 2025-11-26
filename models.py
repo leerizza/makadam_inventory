@@ -43,6 +43,29 @@ class User(Base):
 #     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    type = Column(String, nullable=False)
+    number = Column(String, nullable=True)
+    current_balance = Column(Numeric(18, 2), nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),   # <-- otomatis di-set tiap UPDATE lewat SQLAlchemy
+        nullable=False,
+    )
+    expenses = relationship("Expense", back_populates="source_account")
+
 class Product(Base):
     __tablename__ = "products"
 
@@ -73,10 +96,15 @@ class SalesOrder(Base):
     total_amount = Column(Numeric(18, 2), default=0)
     payment_method = Column(String(50), default="CASH")
     notes = Column(String)
+    payment_method = Column(String, nullable=True)
+
+    source_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    source_account = relationship("Account")     # ⬅️ relasi ke Account
 
     items = relationship("SalesOrderItem", back_populates="sale", cascade="all, delete-orphan")
     customer_id = Column(Integer, ForeignKey("customers.id"), nullable=True)
     customer = relationship("Customer", backref="sales_orders")
+
 
 
 class SalesOrderItem(Base):
@@ -174,6 +202,10 @@ class PurchaseOrder(Base):
     payment_method = Column(String(50), default="CASH")
     notes = Column(String)
 
+    payment_method = Column(String, nullable=True)
+    source_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    source_account = relationship("Account")
+
     supplier = relationship("Supplier", back_populates="purchases")
     items = relationship(
         "PurchaseOrderItem",
@@ -207,6 +239,10 @@ class Expense(Base):
     amount = Column(Numeric(18, 2), nullable=False)
     payment_method = Column(String(50), default="CASH")
     notes = Column(String)
+    payment_method = Column(String, nullable=True)
+    
+    source_account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
+    source_account = relationship("Account")
 
 
 class ProductRecipe(Base):
@@ -227,3 +263,49 @@ class ProductRecipe(Base):
         foreign_keys=[component_product_id]
     )
 
+
+# models.py
+
+class PurchasePlan(Base):
+    __tablename__ = "purchase_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True)
+    supplier_name = Column(String(255), nullable=True)
+    target_date = Column(DateTime(timezone=True), nullable=True)
+    notes = Column(String, nullable=True)
+    status = Column(String(20), default="OPEN")  # OPEN, PARTIAL, COMPLETED, CANCELLED
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now()
+    )
+
+    items = relationship("PurchasePlanItem", back_populates="plan")
+
+
+class PurchasePlanItem(Base):
+    __tablename__ = "purchase_plan_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    plan_id = Column(Integer, ForeignKey("purchase_plans.id"), nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+
+    planned_qty = Column(Numeric(18, 2), nullable=False)  # contoh 50
+    received_qty = Column(Numeric(18, 2), default=0)      # accumulator dari semua purchase
+    # remaining_qty = planned_qty - received_qty (boleh dihitung di schema / property)
+
+    plan = relationship("PurchasePlan", back_populates="items")
+    product = relationship("Product")
+
+
+# class Account(Base):
+#     __tablename__ = "accounts"
+
+#     id = Column(Integer, primary_key=True, index=True)
+#     name = Column(String, nullable=False)             # contoh: "BCA"
+#     bank_name = Column(String, nullable=True)         # contoh: "BCA"
+#     account_number = Column(String, nullable=True)    # contoh: "2330171191"
+#     current_balance = Column(Numeric, default=0)
+#     is_active = Column(Boolean, default=True)
