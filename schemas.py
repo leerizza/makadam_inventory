@@ -314,13 +314,13 @@ class ExpenseOut(BaseModel):
     notes: Optional[str]
     source_account_id: Optional[int] = None
     source_account: Optional[AccountOut] = None  # 🔹 buat ledger
-    
+
 # --- Customers ---
 
 class CustomerBase(BaseModel):
     name: str
     phone: str | None = None
-    email: EmailStr | None = None
+    email: str | None = None
     address: str | None = None
     source_channel: str | None = None   # 👈 tambah ini
     notes: str | None = None
