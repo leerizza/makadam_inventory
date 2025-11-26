@@ -42,16 +42,55 @@ def login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    user = db.query(models.User).filter(models.User.username == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+    try:
+        user = (
+            db.query(models.User)
+            .filter(models.User.username == form_data.username)
+            .first()
+        )
 
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username},
-        expires_delta=access_token_expires
-    )
-    return schemas.Token(access_token=access_token, token_type="bearer")
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+
+        # kalau hash di DB aneh (bukan bcrypt yang valid), ini bisa lempar error
+        try:
+            is_valid = verify_password(form_data.password, user.password_hash)
+        except Exception as e:
+            # tulis ke logs Railway biar keliatan
+            print("Error verifying password:", repr(e))
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+            )
+
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.username},
+            expires_delta=access_token_expires,
+        )
+
+        return {"access_token": access_token, "token_type": "bearer"}
+
+    except HTTPException:
+        # lempar ulang biar status code & pesan tetap
+        raise
+    except Exception as e:
+        # kalau ada error lain, keliatan di log Railway
+        print("LOGIN ERROR:", repr(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal auth error",
+        )
+
 
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> models.User:
