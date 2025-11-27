@@ -4,43 +4,90 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from urllib.parse import quote_plus, urlparse, urlunparse
 import os
 from dotenv import load_dotenv
+import sys
 
+# Load .env hanya untuk development
 load_dotenv()
 
+# Get DATABASE_URL
 raw_url = os.getenv("DATABASE_URL")
 
 if not raw_url:
-    raise RuntimeError("❌ DATABASE_URL tidak ditemukan di .env")
+    print("❌ ERROR: DATABASE_URL tidak ditemukan di environment variables!")
+    print("   Pastikan sudah set di Railway Dashboard → Variables")
+    sys.exit(1)
 
-# --- Safety check: URL encoding password otomatis ---
-parsed = urlparse(raw_url)
+print(f"🔍 Parsing DATABASE_URL...")
 
-# extract password
-password = parsed.password
-if password is None:
-    raise RuntimeError("❌ DATABASE_URL tidak memiliki password!")
+try:
+    parsed = urlparse(raw_url)
+    
+    # Extract password
+    password = parsed.password
+    if password is None:
+        print("❌ ERROR: DATABASE_URL tidak memiliki password!")
+        sys.exit(1)
+    
+    # Encode password (supaya karakter khusus ! @ : tidak bikin error)
+    encoded_password = quote_plus(password)
+    
+    # Rebuild URL dengan password yang sudah encoded
+    safe_netloc = f"{parsed.username}:{encoded_password}@{parsed.hostname}"
+    
+    # Handle port (bisa None)
+    if parsed.port:
+        safe_netloc += f":{parsed.port}"
+    
+    safe_url = urlunparse((
+        parsed.scheme,
+        safe_netloc,
+        parsed.path,
+        parsed.params,
+        parsed.query,
+        parsed.fragment
+    ))
+    
+    print(f"✅ Database URL parsed successfully")
+    print(f"   Host: {parsed.hostname}")
+    print(f"   Port: {parsed.port or 'default'}")
+    print(f"   Database: {parsed.path.strip('/')}")
 
-# encode password (supaya ! @ : tidak bikin error)
-encoded_password = quote_plus(password)
+except Exception as e:
+    print(f"❌ ERROR parsing DATABASE_URL: {e}")
+    sys.exit(1)
 
-# rebuild URL dengan password yang sudah encoded
-safe_netloc = f"{parsed.username}:{encoded_password}@{parsed.hostname}:{parsed.port}"
-safe_url = urlunparse((
-    parsed.scheme,
-    safe_netloc,
-    parsed.path,
-    parsed.params,
-    parsed.query,
-    parsed.fragment
-))
-
-# Engine ke Supabase
-engine = create_engine(
-    safe_url,
-    pool_pre_ping=True,        # menjaga koneksi tetap hidup
-    pool_size=5,
-    max_overflow=10
-)
+# Create Engine
+try:
+    print(f"🔌 Connecting to database...")
+    
+    engine = create_engine(
+        safe_url,
+        pool_pre_ping=True,        # menjaga koneksi tetap hidup
+        pool_size=5,
+        max_overflow=10,
+        echo=False,                 # Set True untuk debug SQL queries
+        connect_args={
+            "connect_timeout": 10,
+            "options": "-c timezone=utc"
+        }
+    )
+    
+    # Test connection
+    with engine.connect() as conn:
+        result = conn.execute("SELECT version()")
+        version = result.fetchone()[0]
+        print(f"✅ Database connected successfully!")
+        print(f"   PostgreSQL version: {version[:50]}...")
+    
+except Exception as e:
+    print(f"❌ ERROR: Database connection failed!")
+    print(f"   Error: {e}")
+    print(f"   ")
+    print(f"   Troubleshooting:")
+    print(f"   1. Pastikan DATABASE_URL benar di Railway Variables")
+    print(f"   2. Cek Supabase pooler masih aktif")
+    print(f"   3. Cek firewall/network rules")
+    sys.exit(1)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
