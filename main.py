@@ -23,6 +23,7 @@ app = FastAPI(title="POS & Finance API")
 origins = [
     "http://localhost:5173",
     "http://localhost:3000",
+    "https://makadam-inventory-ui.vercel.app",
     # kalau kamu akses dari IP lain / domain lain, tambahkan di sini
     # "http://10.121.1.62:5173",
 ]
