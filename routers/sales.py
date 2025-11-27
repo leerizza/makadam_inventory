@@ -297,7 +297,7 @@ def list_sales(
         db.query(models.SalesOrder)
         .options(
             joinedload(models.SalesOrder.items).joinedload(models.SalesOrderItem.product),
-            joinedload(models.SalesOrder.source_account),   # ⬅️ load akun
+            joinedload(models.SalesOrder.source_account),
         )
     )
 
@@ -320,33 +320,8 @@ def list_sales(
     return sales
 
 
-@router.get("/{sale_id}", response_model=schemas.SalesOut)
-def get_sale(
-    sale_id: int,
-    db: Session = Depends(get_db),
-    user=Depends(get_current_user),
-):
-    sale = (
-        db.query(models.SalesOrder)
-        .options(
-            joinedload(models.SalesOrder.items).joinedload(models.SalesOrderItem.product),
-            joinedload(models.SalesOrder.source_account),
-        )
-        .filter(models.SalesOrder.id == sale_id)
-        .first()
-    )
-    if not sale:
-        raise HTTPException(status_code=404, detail="Sale not found")
-
-    for item in sale.items:
-        if item.product:
-            item.product_name = item.product.name
-
-    return sale
-
-
 # =====================================================
-# GET SINGLE SALE
+# GET SINGLE SALE (FIXED - No duplicate)
 # =====================================================
 @router.get("/{sale_id}", response_model=schemas.SalesOut)
 def get_sale(
@@ -354,6 +329,7 @@ def get_sale(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    """Get single sale by ID"""
     sale = (
         db.query(models.SalesOrder)
         .options(
