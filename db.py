@@ -1,5 +1,5 @@
 # db.py
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from urllib.parse import quote_plus, urlparse, urlunparse
 import os
@@ -68,16 +68,14 @@ try:
         echo=False,                 # Set True untuk debug SQL queries
         connect_args={
             "connect_timeout": 10,
-            "options": "-c timezone=utc"
         }
     )
     
-    # Test connection
+    # Test connection dengan SQLAlchemy 2.0 syntax
     with engine.connect() as conn:
-        result = conn.execute("SELECT version()")
-        version = result.fetchone()[0]
+        result = conn.execute(text("SELECT 1"))
+        result.fetchone()
         print(f"✅ Database connected successfully!")
-        print(f"   PostgreSQL version: {version[:50]}...")
     
 except Exception as e:
     print(f"❌ ERROR: Database connection failed!")
@@ -87,6 +85,8 @@ except Exception as e:
     print(f"   1. Pastikan DATABASE_URL benar di Railway Variables")
     print(f"   2. Cek Supabase pooler masih aktif")
     print(f"   3. Cek firewall/network rules")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
